@@ -360,8 +360,6 @@ public class Span implements Closeable {
      * @param value
      */
     public void addTag(String key, String value) {
-    		if(tags == null) 
-    			tags = new HashMap<String,String>(1);
     		tags.put(key, value);
     }
     
