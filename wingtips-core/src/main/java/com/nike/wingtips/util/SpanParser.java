@@ -1,6 +1,5 @@
 package com.nike.wingtips.util;
 
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Map;
@@ -8,7 +7,6 @@ import java.util.Map;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import com.nike.internal.util.StringUtils;
 import com.nike.wingtips.Span;
 import com.nike.wingtips.Span.SpanPurpose;
 
@@ -56,7 +54,7 @@ public class SpanParser {
             builder.append(",").append(DURATION_NANOS_FIELD).append("=").append(span.getDurationNanos());
         }
         if (span.getTags() != null && !span.getTags().isEmpty()) 
-        		builder.append(",").append(TAGS_FIELD).append("=").append(convertMapToPipeDelimitedString(span.getTags()));
+        		builder.append(",").append(TAGS_FIELD).append("=[").append(convertMapToKeyValueString(span.getTags())).append("]");
         
         return builder.toString();
 	}
@@ -79,10 +77,13 @@ public class SpanParser {
         if (span.isCompleted()) {
             builder.append("\",\"").append(DURATION_NANOS_FIELD).append("\":\"").append(span.getDurationNanos());
         }
+        builder.append("\"");
         if(!span.getTags().isEmpty()) {
-        		builder.append("\",\"").append(TAGS_FIELD).append("\":\"").append(convertMapToPipeDelimitedString(span.getTags()));
-        }
-        builder.append("\"}");
+        		// Create nested json for the tags
+        		builder.append(",\"").append(TAGS_FIELD).append("\":{");
+        		builder.append(convertMapToJsonValues(span.getTags())).append("}");
+        } 
+        builder.append("}");
 
         return builder.toString();
 	}
@@ -95,24 +96,65 @@ public class SpanParser {
      */
     public static Span fromKeyValueString(String keyValueStr) {
         try {
-            // Create a map of keys to values.
-            Map<String, String> map = new HashMap<>();
+        		Map<String,String> map;
 
-            // Split on the commas that separate the key/value pairs.
-            String[] fieldPairs = keyValueStr.split(",");
-            for (String fieldPair : fieldPairs) {
-                // Split again on the equals character that separate the field's key from its value.
-                String[] keyVal = fieldPair.split("=");
-                map.put(keyVal[0], keyVal[1]);
+        		if(keyValueStringHasTagsPresent(keyValueStr)) {
+        			//Pull tags into their own map
+        			Map<String,String> tags = parseTagsFromFullKeyValueString(keyValueStr);
+        			//Strip out the tags
+        			String keyValueStrWithoutTags = removeTagsFromKeyValueString(keyValueStr);
+        			//Parse the remaining keyValue pairs
+        			map = getMapFromKeyValueString(keyValueStrWithoutTags);
+        			return fromKeyValueMap(map, tags);
+            } else {
+            		map = getMapFromKeyValueString(keyValueStr);
+            		return fromKeyValueMap(map, null);
             }
-
-            return fromKeyValueMap(map);
+            
         } catch (Exception e) {
             logger.error("Error extracting Span from key/value string. Defaulting to null. bad_span_key_value_string={}", keyValueStr, e);
             return null;
         }
     }
 
+    private static boolean keyValueStringHasTagsPresent(String keyValueStr) {
+    		return keyValueStr.contains(TAGS_FIELD + "=[");
+    }
+    private static Map<String,String> parseTagsFromFullKeyValueString(String keyValueStr) {
+    		String tagsKeyValueString = parseTagKeyValueString(keyValueStr);
+    		return getMapFromKeyValueString(tagsKeyValueString);
+    }
+    
+    /** Returns only the key value pairs, not the tags=[   and closing   ]  **/
+    protected static String parseTagKeyValueString(String keyValueStr) {
+    		// find where it starts and then move forward the length of the pattern
+		int tagStart = keyValueStr.indexOf( TAGS_FIELD+"=[" ) + TAGS_FIELD.length() + 2;
+		int tagEnd = keyValueStr.indexOf("]");
+		String tagsOnly = keyValueStr.substring(tagStart, tagEnd);
+		return tagsOnly;
+    }
+    
+    private static String removeTagsFromKeyValueString(String keyValueStrWithTags) {
+    		String tagStringToRemove = "," + TAGS_FIELD + "=[" + parseTagKeyValueString(keyValueStrWithTags) + "]";
+    		return keyValueStrWithTags.replace(tagStringToRemove, "");
+    }
+    
+    /** 
+     * @param keyValueStr Should be in format {@code key=value,key2=value2}
+     */
+    private static Map<String,String> getMapFromKeyValueString(String keyValueStr) {
+    		// Create a map of keys to values.
+        Map<String, String> map = new HashMap<>();
+
+        // Split on the commas that separate the key/value pairs.
+        String[] fieldPairs = keyValueStr.split(",");
+        for (String fieldPair : fieldPairs) {
+            // Split again on the equals character that separate the field's key from its value.
+            String[] keyVal = fieldPair.split("=");
+            map.put(keyVal[0], keyVal[1]);
+        }
+        return map;
+    }
     /**
      * @return The {@link Span} represented by the given JSON string, or null if a proper span could not be deserialized from the given string.
      *          <b>WARNING:</b> This method assumes the JSON you're trying to deserialize originally came from {@link #toJSON()}.
@@ -121,28 +163,76 @@ public class SpanParser {
      */
     public static Span fromJSON(String json) {
         try {
-            // Create a map of JSON field keys to values.
-            Map<String, String> map = new HashMap<>();
-
-            // Strip off the {" and "} at the beginning/end.
-            String innerJsonCore = json.substring(2, json.length() - 2);
-            // Split on the doublequotes-comma-doublequotes that separate the fields.
-            String[] fieldPairs = innerJsonCore.split("\",\"");
-            for (String fieldPair : fieldPairs) {
-                // Split again on the doublequotes-colon-doublequotes that separate the field's key from its value. At this point all double-quotes have been stripped off
-                // and we can just map the key to the value.
-                String[] keyVal = fieldPair.split("\":\"");
-                map.put(keyVal[0], keyVal[1]);
+        		Map<String,String> tags = null;
+        		Map<String,String> map;
+            if(json.contains("\""+TAGS_FIELD+"\":{")) {
+            		tags = parseTagsFromNestedJson(json);
+            		String jsonWithoutNestedTags = removeTagsFromJson(json);
+            		map = parseSingleKeyValueJson(jsonWithoutNestedTags); 
+            } else {
+            		map = parseSingleKeyValueJson(json);
             }
 
-            return fromKeyValueMap(map);
+            return fromKeyValueMap(map, tags);
         } catch (Exception e) {
             logger.error("Error extracting Span from JSON. Defaulting to null. bad_span_json={}", json, e);
             return null;
         }
     }
+    
+    protected static Map<String,String> parseTagsFromNestedJson(String jsonWithNestedTagValues) {
+    		String tagsOnly = parseNestedTagJson(jsonWithNestedTagValues);
+		return parseSingleKeyValueJson(tagsOnly);
+    }
+    
+    /** @return the inner set of tag pairs with surrounding { }  **/
+    protected static String parseNestedTagJson(String jsonWithNestedTagValues) {
+    		int tagStart = jsonWithNestedTagValues.indexOf(TAGS_FIELD + "\":") + TAGS_FIELD.length() + 2;
+		int tagEnd = jsonWithNestedTagValues.indexOf("}") + 1;
+		String tagsOnly = jsonWithNestedTagValues.substring(tagStart, tagEnd);
+		return tagsOnly;
+    }
+    
+    protected static String removeTagsFromJson(String jsonWithNestedValues) {
+    		String fullTagJson = ",\"" + TAGS_FIELD + "\":" + parseNestedTagJson(jsonWithNestedValues);
+    		return jsonWithNestedValues.replace(fullTagJson, "");
+    }
+    
+    protected static String convertMapToJsonValues(Map<String,String> map) {
+    		StringBuilder builder = new StringBuilder();
+    		Iterator<Map.Entry<String, String>> it = map.entrySet().iterator();
+	    while (it.hasNext()) {
+	        Map.Entry<String,String> tag = (Map.Entry<String,String>)it.next();
+			builder.append("\"").append(tag.getKey()).append("\":\"").append(tag.getValue()).append("\"");
+			 if(it.hasNext())
+	        		builder.append(",");
+		}
+	    return builder.toString();
+    }
+    
+    /**
+     * This method expects no nested JSON values. For example {tags: {tag1:val1,tag2:val2}} will throw an exception.
+     * @param json
+     * @return
+     */
+    private static Map<String,String> parseSingleKeyValueJson(String json) {
+    		// Create a map of JSON field keys to values.
+        Map<String, String> map = new HashMap<>();
 
-    private static Span fromKeyValueMap(Map<String, String> map) {
+        // Strip off the {" and "} at the beginning/end.
+        String innerJsonCore = json.substring(2, json.length() - 2);
+        // Split on the doublequotes-comma-doublequotes that separate the fields.
+        String[] fieldPairs = innerJsonCore.split("\",\"");
+        for (String fieldPair : fieldPairs) {
+            // Split again on the doublequotes-colon-doublequotes that separate the field's key from its value. At this point all double-quotes have been stripped off
+            // and we can just map the key to the value.
+            String[] keyVal = fieldPair.split("\":\"");
+            map.put(keyVal[0], keyVal[1]);
+        }
+        return map;
+    }
+
+    private static Span fromKeyValueMap(Map<String, String> map, Map<String,String> tags) {
         // Use the map to get the field values for the span.
         String traceId = nullSafeGetString(map, TRACE_ID_FIELD);
         String spanId = nullSafeGetString(map, SPAN_ID_FIELD);
@@ -157,56 +247,27 @@ public class SpanParser {
             throw new IllegalStateException("Unable to parse " + START_TIME_EPOCH_MICROS_FIELD + " from JSON");
         Long durationNanos = nullSafeGetLong(map, DURATION_NANOS_FIELD);
         SpanPurpose spanPurpose = nullSafeGetSpanPurpose(map, SPAN_PURPOSE_FIELD);
-        Map<String,String> tags = parsePipeDelimitedString(nullSafeGetString(map, TAGS_FIELD));
         return new Span(traceId, parentSpanId, spanId, spanName, sampleable, userId, spanPurpose, startTimeEpochMicros, null, durationNanos, tags);
     }
     
     /**
-     * Takes a map and stores the {@code key} and {@code value} in a specific format that won't be split apart by the other 
-     * parsers in this {@code class}. 
-     * <pre>
-     * Given map [{key1,value1},{key2,value2}] the resulting string will be:
-     * "key1":"value1"|"key2":"value2"
-     * </pre>
-     * @param map
-     * @return
      * @todo Could have a ConcurrentModificationException if tags are added while iterating through
      */
-    static String convertMapToPipeDelimitedString(Map<String, String> map) {
+    static String convertMapToKeyValueString(Map<String, String> map) {
     		StringBuilder builder = new StringBuilder();
 		if(map != null && map.size() > 0) {
 			Iterator<Map.Entry<String, String>> it = map.entrySet().iterator();
 		    while (it.hasNext()) {
 		        Map.Entry<String,String> pair = (Map.Entry<String,String>)it.next();
-		        builder.append("'").append(pair.getKey()).append("':'").append(pair.getValue()).append("'");
+		        builder.append(pair.getKey()).append("=").append(pair.getValue());
 		        if(it.hasNext())
-		        		builder.append(">");
+		        		builder.append(",");
 		    }
 		} 
 
 		return builder.toString();
     }
-    
-    static Map<String,String> parsePipeDelimitedString(String pipeDelimitedString) {
-    		if(StringUtils.isEmpty(pipeDelimitedString))
-    			return Collections.emptyMap();
-    		return parseDelimitedPairs(pipeDelimitedString, "'>'", "':'");
-    }
-    
-    private static Map<String,String> parseDelimitedPairs(String toBeParsed, String pairDelimiter, String keyValueDelimiter) {
-    		Map<String, String> map = new HashMap<>();
-
-		//Split the pairs apart based on the first pattern
-        String[] fieldPairs = toBeParsed.split(pairDelimiter);
-        for (String fieldPair : fieldPairs) {
-            // Split again on the pattern that separate the field's key from its value. 
-            String[] keyVal = fieldPair.split(keyValueDelimiter);
-            map.put(keyVal[0], keyVal[1]);
-        }
-
-        return map;	
-    }
-    
+     
     private static String nullSafeGetString(Map<String, String> map, String key) {
         String value = map.get(key);
         if (value == null || value.equals("null"))

@@ -3,6 +3,7 @@ package com.nike.wingtips.util;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import java.io.IOException;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
@@ -38,12 +39,46 @@ public class SpanParserTest {
         System.nanoTime());
     private long durationNanosForFullyCompletedSpan = 424242;
     private SpanPurpose spanPurposeForFullyCompletedSpan = SpanPurpose.SERVER;
-    private Map<String,String> tags = new HashMap<String,String>();
 
     private ObjectMapper objectMapper = new ObjectMapper();
 
+    private enum TAG_SET {
+    		NULL {
+    			public Map<String,String> getTags() {
+    				return null;
+    			}
+    		},
+    		SINGLE_VALUE {
+    			public Map<String,String> getTags() {
+    				return Collections.singletonMap("Key", "Value");
+    			}
+    		},
+    		MULTIPLE_VALUES {
+    			public Map<String,String> getTags() {
+    				Map<String, String> tags = new HashMap<String,String>();
+    				tags.put("key", "value");
+    				tags.put("color", "blue");
+    				tags.put("day", "today");
+    				return tags;
+    			}
+    		},
+    		SPECIAL_CHARS {
+    			public Map<String,String> getTags() {
+    				Map<String, String> tags = new HashMap<String,String>();
+    				tags.put("key+s", "value");
+    				tags.put("c0!0$%^&", "$%^&(*&^&*<>?");
+    				return tags;
+    			}
+    		};
+    		
+    		public abstract Map<String,String> getTags();
+    }
     
     private Span createFilledOutSpan(boolean completed) {
+    		return createFilledOutSpan(completed, TAG_SET.SINGLE_VALUE.getTags());
+    }
+    
+    private Span createFilledOutSpan(boolean completed, Map<String, String> tags) {
         Long durationNanos = (completed) ? durationNanosForFullyCompletedSpan : null;
         return new Span(traceId, parentSpanId, spanId, spanName, sampleableForFullyCompleteSpan, userId,
                         spanPurposeForFullyCompletedSpan, startTimeEpochMicrosForFullyCompleteSpan, startTimeNanosForFullyCompleteSpan, durationNanos, tags);
@@ -96,8 +131,11 @@ public class SpanParserTest {
         assertThat(nullSafeStringValueOf(span.getUserId())).isEqualTo(deserializedValues.get(SpanParser.USER_ID_FIELD));
         assertThat(nullSafeStringValueOf(span.getDurationNanos())).isEqualTo(nullSafeStringValueOf(deserializedValues.get(SpanParser.DURATION_NANOS_FIELD)));
         assertThat(nullSafeStringValueOf(span.getSpanPurpose())).isEqualTo(nullSafeStringValueOf(deserializedValues.get(SpanParser.SPAN_PURPOSE_FIELD)));
-        assertThat(twoMapsAreEqual(span.getTags(), SpanParser.parsePipeDelimitedString(deserializedValues.get(SpanParser.TAGS_FIELD))));
     }
+	
+	private void verifySpanTagsEqualDeserializedValues(Map<String,String> tags, Map<String,String> deserializedTags) {
+		assertThat(twoMapsAreEqual(tags, deserializedTags));
+	}
 	
 	protected boolean twoMapsAreEqual(Map<String, String> one, Map<String,String> two) {
 		if (one.size() != two.size()) 
@@ -118,10 +156,17 @@ public class SpanParserTest {
 		return true;
 	}
 	
+	/** @todo Create a TypeReference that knows how to parse this JSON **/
+	@DataProvider( value = {
+        "NULL",
+        "SINGLE_VALUE",
+        "MULTIPLE_VALUES",
+        "SPECIAL_CHARS"
+    })
 	@Test
-    public void toJson_should_function_properly_when_there_are_no_null_values() throws IOException {
+    public void toJson_should_function_properly_when_there_are_no_null_values(TAG_SET tags) throws IOException {
         // given: valid span without any null values, span completed (so that end time is not null) and JSON string from Span.toJson()
-        Span validSpan = createFilledOutSpan(true);
+        Span validSpan = createFilledOutSpan(true, tags.getTags());
         assertThat(validSpan.getTraceId()).isNotEmpty();
         assertThat(validSpan.getUserId()).isNotEmpty();
         assertThat(validSpan.getParentSpanId()).isNotEmpty();
@@ -131,12 +176,23 @@ public class SpanParserTest {
         assertThat(validSpan.isCompleted()).isTrue();
         assertThat(validSpan.getSpanPurpose()).isNotNull();
         String json = validSpan.toJSON();
-
-        // when: jackson is used to deserialize that JSON
-        Map<String, String> spanValuesFromJackson = objectMapper.readValue(json, new TypeReference<Map<String, String>>() { });
-
-        // then: the original span and jackson's span values should be exactly the same
-        verifySpanEqualsDeserializedValues(validSpan, spanValuesFromJackson);
+        
+        if(tags.getTags() == null || tags.getTags().isEmpty()) {
+        		Map<String, String> spanValuesFromJackson = objectMapper.readValue(json, new TypeReference<Map<String, String>>() {});
+        		verifySpanEqualsDeserializedValues(validSpan, spanValuesFromJackson);
+        } else {
+        		//Parse the tags separately from the rest of the json
+        		String jsonWithoutNestedTags = SpanParser.removeTagsFromJson(json);
+        		String tagJson = SpanParser.parseNestedTagJson(json);
+      
+        		// when: jackson is used to deserialize that JSON
+        		Map<String, String> spanValuesFromJackson = objectMapper.readValue(jsonWithoutNestedTags, new TypeReference<Map<String, String>>() {});
+        		Map<String, String> tagsFromJackson = objectMapper.readValue(tagJson, new TypeReference<Map<String, String>>() {});
+      
+        		// then: the original span context and jackson's span context values should be exactly the same
+        		verifySpanEqualsDeserializedValues(validSpan, spanValuesFromJackson);
+        		verifySpanTagsEqualDeserializedValues(validSpan.getTags(), tagsFromJackson);
+        }
     }
 
     @Test
@@ -199,70 +255,75 @@ public class SpanParserTest {
         assertThat(toJsonResult).isEqualTo(uuidString);
     }
     
-    @Test
-    public void toJson_should_function_properly_with_no_tags() throws IOException {
-        // given: valid span with null values and JSON string from Span.toJson()
-        Span validSpan = Span.generateRootSpanForNewTrace(spanName, null).build();
-        assertThat(validSpan.getTags()).isEmpty();
-        
-        String json = validSpan.toJSON();
+//    @Test
+//    public void toJson_should_function_properly_with_no_tags() throws IOException {
+//        // given: valid span with null values and JSON string from Span.toJson()
+//        Span validSpan = Span.generateRootSpanForNewTrace(spanName, null).build();
+//        assertThat(validSpan.getTags()).isEmpty();
+//        
+//        String json = validSpan.toJSON();
+//
+//        // when: jackson is used to deserialize that JSON
+//        Map<String, String> spanValuesFromJackson = objectMapper.readValue(json, new TypeReference<Map<String, String>>() {});
+//
+//        // then: the original span context and jackson's span context values should be exactly the same
+//        verifySpanEqualsDeserializedValues(validSpan, spanValuesFromJackson);
+//    }
 
-        // when: jackson is used to deserialize that JSON
-        Map<String, String> spanValuesFromJackson = objectMapper.readValue(json, new TypeReference<Map<String, String>>() {});
-
-        // then: the original span context and jackson's span context values should be exactly the same
-        verifySpanEqualsDeserializedValues(validSpan, spanValuesFromJackson);
-    }
-
-    @Test
-    public void toJson_should_function_properly_with_one_tag() throws IOException {
-        // given: valid span with null values and JSON string from Span.toJson()
-        Span validSpan = Span.generateRootSpanForNewTrace(spanName, null).build();
-        validSpan.addTag("Key", "value");
-        assertThat(validSpan.getTags()).isNotEmpty();
-        
-        String json = validSpan.toJSON();
-
-        // when: jackson is used to deserialize that JSON
-        Map<String, String> spanValuesFromJackson = objectMapper.readValue(json, new TypeReference<Map<String, String>>() {});
-
-        // then: the original span context and jackson's span context values should be exactly the same
-        verifySpanEqualsDeserializedValues(validSpan, spanValuesFromJackson);
-    }
-    
-    @Test
-    public void toJson_should_function_properly_with_multiple_tags() throws IOException {
-        // given: valid span with null values and JSON string from Span.toJson()
-        Span validSpan = Span.generateRootSpanForNewTrace(spanName, null).build();
-        validSpan.addTag("Key", "value");
-        validSpan.addTag("Key2", "value2");
-        assertThat(validSpan.getTags()).isNotEmpty();
-        
-        String json = validSpan.toJSON();
-
-        // when: jackson is used to deserialize that JSON
-        Map<String, String> spanValuesFromJackson = objectMapper.readValue(json, new TypeReference<Map<String, String>>() {});
-
-        // then: the original span context and jackson's span context values should be exactly the same
-        verifySpanEqualsDeserializedValues(validSpan, spanValuesFromJackson);
-    }
-    
-    @Test
-    public void toJson_should_function_properly_with_special_chars_in_tag() throws IOException {
-        // given: valid span with null values and JSON string from Span.toJson()
-        Span validSpan = Span.generateRootSpanForNewTrace(spanName, null).build();
-        validSpan.addTag("Key-a-1!|/!@>:#$%%^&*()", "v@l|>u$:|");
-        
-        assertThat(validSpan.getTags()).isNotEmpty();
-        
-        String json = validSpan.toJSON();
-
-        // when: jackson is used to deserialize that JSON
-        Map<String, String> spanValuesFromJackson = objectMapper.readValue(json, new TypeReference<Map<String, String>>() {});
-
-        // then: the original span context and jackson's span context values should be exactly the same
-        verifySpanEqualsDeserializedValues(validSpan, spanValuesFromJackson);
-    }
+//    @Test
+//    public void toJson_should_function_properly_with_one_tag() throws IOException {
+//        // given: valid span with null values and JSON string from Span.toJson()
+//        Span validSpan = Span.generateRootSpanForNewTrace(spanName, null).build();
+//        validSpan.addTag("Key", "value");
+//        assertThat(validSpan.getTags()).isNotEmpty();
+//        
+//        String json = validSpan.toJSON();
+//
+//        // when: jackson is used to deserialize that JSON
+//        Map<String, String> spanValuesFromJackson = objectMapper.readValue(json, new TypeReference<Map<String, String>>() {});
+//
+//        // then: the original span context and jackson's span context values should be exactly the same
+//        verifySpanEqualsDeserializedValues(validSpan, spanValuesFromJackson);
+//    }
+//    
+//    @Test
+//    public void toJson_should_function_properly_with_multiple_tags() throws IOException {
+//        // given: valid span with null values and JSON string from Span.toJson()
+//        Span validSpan = Span.generateRootSpanForNewTrace(spanName, null).build();
+//        validSpan.addTag("Key", "value");
+//        validSpan.addTag("Key2", "value2");
+//        assertThat(validSpan.getTags()).isNotEmpty();
+//        
+//        String json = validSpan.toJSON();
+//
+//        // when: jackson is used to deserialize that JSON
+//        Map<String, String> spanValuesFromJackson = objectMapper.readValue(json, new TypeReference<Map<String, String>>() {});
+//
+//        // then: the original span context and jackson's span context values should be exactly the same
+//        verifySpanEqualsDeserializedValues(validSpan, spanValuesFromJackson);
+//    }
+//    
+//    @Test
+//    public void toJson_should_function_properly_with_special_chars_in_tag() throws IOException {
+//        // given: valid span with null values and JSON string from Span.toJson()
+//        Span validSpan = Span.generateRootSpanForNewTrace(spanName, null).build();
+//        validSpan.addTag("Key-a-1!|/!@>#$%%^&*()", "v@l|>u$|");
+//        
+//        assertThat(validSpan.getTags()).isNotEmpty();
+//        
+//        String json = validSpan.toJSON();
+//
+//        String jsonWithoutNestedTags = SpanParser.removeNestedTagsJson(json);
+//        String tagJson = SpanParser.parseNestedTagJson(json);
+//        
+//        // when: jackson is used to deserialize that JSON
+//        Map<String, String> spanValuesFromJackson = objectMapper.readValue(jsonWithoutNestedTags, new TypeReference<Map<String, String>>() {});
+//        Map<String, String> tagsFromJackson = objectMapper.readValue(tagJson, new TypeReference<Map<String, String>>() {});
+//        
+//        // then: the original span context and jackson's span context values should be exactly the same
+//        verifySpanEqualsDeserializedValues(validSpan, spanValuesFromJackson);
+//        verifySpanTagsEqualDeserializedValues(validSpan.getTags(), tagsFromJackson);
+//    }
     
     @Test
     public void complete_should_reset_cached_json() throws IOException {
@@ -283,10 +344,16 @@ public class SpanParserTest {
         verifySpanEqualsDeserializedValues(validSpan, spanValuesFromJackson);
     }
 
+    @DataProvider( value = {
+            "NULL",
+            "SINGLE_VALUE",
+            "MULTIPLE_VALUES",
+            "SPECIAL_CHARS"
+        })
     @Test
-    public void fromJson_should_function_properly_when_there_are_no_null_values() {
+    public void fromJson_should_function_properly_when_there_are_no_null_values(TAG_SET tags) {
         // given: valid span without any null values, completed (so that end time is not null) and JSON string from Span.toJson()
-        Span validSpan = createFilledOutSpan(true);
+        Span validSpan = createFilledOutSpan(true, tags.getTags());
         assertThat(validSpan).isNotNull();
         assertThat(validSpan.getTraceId()).isNotNull();
         assertThat(validSpan.getUserId()).isNotNull();
@@ -429,10 +496,16 @@ public class SpanParserTest {
         return map;
     }
 
+    @DataProvider( value = {
+            "NULL",
+            "SINGLE_VALUE",
+            "MULTIPLE_VALUES",
+            "SPECIAL_CHARS"
+        })
     @Test
-    public void toKeyValueString_should_function_properly_when_there_are_no_null_values() throws IOException {
+    public void toKeyValueString_should_function_properly_when_there_are_no_null_values(TAG_SET tags) throws IOException {
         // given: valid known span without any null values, span completed (so that end time is not null) and key/value string from Span.toKeyValueString()
-        Span validSpan = createFilledOutSpan(true);
+        Span validSpan = createFilledOutSpan(true,tags.getTags());
         assertThat(validSpan.getTraceId()).isNotEmpty();
         assertThat(validSpan.getUserId()).isNotEmpty();
         assertThat(validSpan.getParentSpanId()).isNotEmpty();
@@ -528,10 +601,16 @@ public class SpanParserTest {
         verifySpanEqualsDeserializedValues(validSpan, deserializedValues);
     }
 
+    @DataProvider( value = {
+            "NULL",
+            "SINGLE_VALUE",
+            "MULTIPLE_VALUES",
+            "SPECIAL_CHARS"
+        })
     @Test
-    public void fromKeyValueString_should_function_properly_when_there_are_no_null_values() {
+    public void fromKeyValueString_should_function_properly_when_there_are_no_null_values(TAG_SET tags) {
         // given: valid span without any null values, completed (so that end time is not null) and key/value string from Span.fromKeyValueString()
-        Span validSpan = createFilledOutSpan(true);
+        Span validSpan = createFilledOutSpan(true, tags.getTags());
         assertThat(validSpan).isNotNull();
         assertThat(validSpan.getTraceId()).isNotNull();
         assertThat(validSpan.getUserId()).isNotNull();
