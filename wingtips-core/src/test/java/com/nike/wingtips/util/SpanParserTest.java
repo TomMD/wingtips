@@ -18,9 +18,12 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.nike.wingtips.Span;
 import com.nike.wingtips.Span.SpanPurpose;
+import com.nike.wingtips.TestSpanCompleter;
 import com.nike.wingtips.TraceAndSpanIdGenerator;
 import com.tngtech.java.junit.dataprovider.DataProvider;
 import com.tngtech.java.junit.dataprovider.DataProviderRunner;
+
+import com.nike.wingtips.Tracer;
 
 @RunWith(DataProviderRunner.class)
 public class SpanParserTest {
@@ -156,6 +159,10 @@ public class SpanParserTest {
 		return true;
 	}
 	
+	protected void completeSpan(Span span) {
+		TestSpanCompleter.completeSpan(span);
+	}
+	
 	/** @todo Create a TypeReference that knows how to parse this JSON **/
 	@DataProvider( value = {
         "NULL",
@@ -229,7 +236,7 @@ public class SpanParserTest {
     public void toJson_should_function_properly_for_completed_spans() throws IOException {
         // given: valid span and completed, and JSON string from Span.toJson()
         Span validSpan = Span.generateRootSpanForNewTrace(spanName, spanPurpose).build();
-        validSpan.complete();
+        completeSpan(validSpan);
         assertThat(validSpan.isCompleted()).isTrue();
         assertThat(validSpan.getDurationNanos()).isNotNull();
         String json = validSpan.toJSON();
@@ -334,7 +341,7 @@ public class SpanParserTest {
 
         // when
         String beforeCompleteJson = validSpan.toJSON();
-        validSpan.complete();
+        completeSpan(validSpan);
 
         // then
         String afterCompleteJson = validSpan.toJSON();
@@ -406,7 +413,7 @@ public class SpanParserTest {
     public void fromJson_should_function_properly_for_completed_spans() throws IOException {
         // given: valid span that has been completed, and JSON string from Span.toJson()
         Span validSpan = Span.generateRootSpanForNewTrace(spanName, spanPurpose).build();
-        validSpan.complete();
+        completeSpan(validSpan);
         assertThat(validSpan.isCompleted()).isTrue();
         String json = validSpan.toJSON();
 
@@ -557,7 +564,7 @@ public class SpanParserTest {
     public void toKeyValueString_should_function_properly_for_completed_spans() throws IOException {
         // given: valid span and completed, and key/value string from Span.toKeyValueString()
         Span validSpan = Span.generateRootSpanForNewTrace(spanName, spanPurpose).build();
-        validSpan.complete();
+        completeSpan(validSpan);
         assertThat(validSpan.isCompleted()).isTrue();
         String keyValueStr = validSpan.toKeyValueString();
 
@@ -591,7 +598,7 @@ public class SpanParserTest {
 
         // when
         String beforeCompleteKeyValueString = validSpan.toKeyValueString();
-        validSpan.complete();
+        completeSpan(validSpan);
 
         // then
         String afterCompleteKeyValueString = validSpan.toKeyValueString();
@@ -664,7 +671,7 @@ public class SpanParserTest {
     public void fromKeyValueString_should_function_properly_for_completed_spans() throws IOException {
         // given: valid span that has been completed, and key/value string from Span.fromKeyValueString()
         Span validSpan = Span.generateRootSpanForNewTrace(spanName, spanPurpose).build();
-        validSpan.complete();
+        completeSpan(validSpan);
         assertThat(validSpan.isCompleted()).isTrue();
         String keyValStr = validSpan.toKeyValueString();
 

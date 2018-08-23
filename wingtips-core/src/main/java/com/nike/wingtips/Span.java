@@ -1,9 +1,8 @@
 package com.nike.wingtips;
 
 import java.io.Closeable;
-import java.util.Collections;
 import java.util.HashMap;
-import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.TimeUnit;
@@ -64,7 +63,7 @@ public class Span implements Closeable {
     private final long spanStartTimeNanos;
     
     private Long durationNanos;
-    private Map<String,String> tags = new HashMap<String,String>(0);
+    private Map<String,String> tags = new LinkedHashMap<String,String>(0);
     
     private String cachedJsonRepresentation;
 
@@ -308,7 +307,7 @@ public class Span implements Closeable {
      * <p/>
      * NOTE: This is intentionally package scoped to make sure completions and logging/span output logic happens centrally through {@link Tracer}.
      */
-    public void complete() {
+    void complete() {
         if (this.durationNanos != null)
             throw new IllegalStateException("This Span is already completed.");
 
@@ -355,11 +354,14 @@ public class Span implements Closeable {
     }
 
     /**
+     * Tags are expressed as key/value pairs. A call to this method will add the key/value pair if it exists
+     * or replaces the current {@code value} if one exists for the respective {@code key}
      * 
-     * @param key
-     * @param value
+     * @see https://github.com/opentracing/opentracing-java/blob/master/opentracing-api/src/main/java/io/opentracing/tag/Tags.java
+     * @param key The tag {@code key}
+     * @param value The tag {@code value} to be set
      */
-    public void addTag(String key, String value) {
+    public void putTag(String key, String value) {
     		tags.put(key, value);
     }
     
@@ -384,6 +386,16 @@ public class Span implements Closeable {
     }
 
     /**
+     * @return The {@link Span} represented by the given key/value string, or null if a proper span could not be deserialized from the given string.
+     *          <b>WARNING:</b> This method assumes the string you're trying to deserialize originally came from
+     *          {@link #toKeyValueString()}. This assumption allows it to be as fast as possible, not worry about syntactically-correct-but-annoying-to-deal-with whitespace,
+     *          not have to use a third party utility, etc.
+     */
+    public static Span fromKeyValueString(String keyValueStr) {
+    		return SpanParser.fromKeyValueString(keyValueStr);
+    }
+    
+    /**
      * @return A JSON string based on this {@link Span} instance.
      *         NOTE: The {@link #DURATION_NANOS_FIELD} field will be added only if {@link #isCompleted()} is true. This lets you call this method at any time
      *         and only the relevant data will be output in the returned JSON (e.g. in case you want to log info about the span before it has been completed).
@@ -396,7 +408,15 @@ public class Span implements Closeable {
         return cachedJsonRepresentation;
     }
 
-    
+    /**
+     * @return The {@link Span} represented by the given JSON string, or null if a proper span could not be deserialized from the given string.
+     *          <b>WARNING:</b> This method assumes the JSON you're trying to deserialize originally came from {@link #toJSON()}.
+     *          This assumption allows it to be as fast as possible, not have to check for malformed JSON, not worry about syntactically-correct-but-annoying-to-deal-with whitespace,
+     *          not have to use a third party utility like Jackson, etc.
+     */
+    public static Span fromJSON(String json) {
+    		return SpanParser.fromJSON(json);
+    }
 
     /**
      * Handles the implementation of {@link Closeable#close()} for spans to allow them to be used in

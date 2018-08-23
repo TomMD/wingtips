@@ -424,10 +424,10 @@ Arbitrary application-specific annotations could be a useful addition however, s
 Tags allow for key-value pairs to be associated with a span as metadata, often useful for filtering or grouping trace information.  For example, say you've instrumented retry logic. It may be desireable to be able to distinguish between a span/trace that contains retries and those that didn't.  Or you may want to tag your spans based on an attribute of the request, like user type or an authenticated flag. 
 
 ```
-Tracer.getInstance().getCurrentSpan().addTag("UserType", user.getType());
+Tracer.getInstance().getCurrentSpan().putTag("UserType", user.getType());
 ```
 
-They value of the tag is mutable and both key and value are stored as strings.  Calling `addTag(...)` will replace any existing values for the key, or add the new key value pair if one doesn't exist. 
+They value of the tag is mutable and both key and value are stored as strings.  Calling `putTag(...)` will replace any existing values for the key, or add the new key value pair if one doesn't exist. 
 
 <a name="integrating_with_other_dtrace_tools"></a>
 ## Integrating With Other Distributed Tracing Tools
