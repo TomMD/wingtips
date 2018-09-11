@@ -72,6 +72,18 @@ public class RequestTracingFilter implements Filter {
      */
     public static final String USER_ID_HEADER_KEYS_LIST_INIT_PARAM_NAME = "user-id-header-keys-list";
 
+
+    /**
+     * A  reference for tag names that match the OpenTracing Tags
+     * @see {@link https://github.com/opentracing/opentracing-java/blob/master/opentracing-api/src/main/java/io/opentracing/tag/Tags.java}
+     */
+    protected static class OpenTracingTags {
+    		public static final String HTTP_URL = "http.url";
+    		public static final String HTTP_STATUS = "http.status_code";
+    		public static final String HTTP_METHOD = "http.method";
+    		public static final String ERROR = "error";
+    }
+    
     protected ServletRuntime servletRuntime;
     protected List<String> userIdHeaderKeysFromInitParam;
 
@@ -133,56 +145,125 @@ public class RequestTracingFilter implements Filter {
         //      on the current thread at the beginning of this method is restored to this thread before this method
         //      returns, even if the request ends up being an async request. Otherwise there's the possibility of
         //      incorrect tracing information sticking around on this thread and potentially polluting other requests.
-        TracingState originalThreadInfo = TracingState.getCurrentThreadTracingState();
-        try {
-            // See if there's trace info in the incoming request's headers. If so it becomes the parent trace.
-            Tracer tracer = Tracer.getInstance();
-            final Span parentSpan = HttpSpanFactory.fromHttpServletRequest(request, getUserIdHeaderKeys());
-            Span newSpan;
 
-            if (parentSpan != null) {
-                logger.debug("Found parent Span {}", parentSpan);
-                newSpan = tracer.startRequestWithChildSpan(parentSpan, HttpSpanFactory.getSpanName(request));
-            } else {
-                newSpan = tracer.startRequestWithRootSpan(
-                    HttpSpanFactory.getSpanName(request),
-                    HttpSpanFactory.getUserIdFromHttpServletRequest(request, getUserIdHeaderKeys())
-                );
-                logger.debug("Parent span not found, starting a new span {}", newSpan);
-            }
+    		TracingState originalThreadInfo = TracingState.getCurrentThreadTracingState();
+    		try {
+    			Span newSpan = createNewSpanForRequest(request);
 
-            // Put the new span's trace info into the request attributes.
-            request.setAttribute(TraceHeaders.TRACE_SAMPLED, newSpan.isSampleable());
-            request.setAttribute(TraceHeaders.TRACE_ID, newSpan.getTraceId());
-            request.setAttribute(TraceHeaders.SPAN_ID, newSpan.getSpanId());
-            request.setAttribute(TraceHeaders.PARENT_SPAN_ID, newSpan.getParentSpanId());
-            request.setAttribute(TraceHeaders.SPAN_NAME, newSpan.getSpanName());
-            request.setAttribute(Span.class.getName(), newSpan);
+    			addTracingInfoToRequestAttributes(newSpan, request);
 
-            // Make sure we set the trace ID on the response header now before the response is committed (if we wait
-            //      until after the filter chain then the response might already be committed, silently preventing us
-            //      from setting the response header)
-            response.setHeader(TraceHeaders.TRACE_ID, newSpan.getTraceId());
+	    		// Make sure we set the trace ID on the response header now before the response is committed (if we wait
+	    		//      until after the filter chain then the response might already be committed, silently preventing us
+	    		//      from setting the response header)
+	    		response.setHeader(TraceHeaders.TRACE_ID, newSpan.getTraceId());
+	
+	    		TracingState originalRequestTracingState = TracingState.getCurrentThreadTracingState();
+	    		try {
+	    			filterChain.doFilter(request, response);
+	    		} finally {
+	    			tagSpanWithRequestAndResponseMetaData(newSpan, request, response);
+	
+	    			if (isAsyncRequest(request)) {
+	    				// Async, so we need to attach a listener to complete the original tracing state when the async
+	    				//      servlet request finishes.
+	    				setupTracingCompletionWhenAsyncRequestCompletes(request, originalRequestTracingState);
+	    			}
+	    			else {
+	    				// Not async, so we need to complete the request span now.
+	    				Tracer.getInstance().completeRequestSpan();
+	    			}
+	    		}
+	    	}
+	    	finally {
+	    		//noinspection deprecation
+	    		unlinkTracingFromCurrentThread(originalThreadInfo);
+	    	}
+    }
 
-            TracingState originalRequestTracingState = TracingState.getCurrentThreadTracingState();
-            try {
-                filterChain.doFilter(request, response);
-            } finally {
-                if (isAsyncRequest(request)) {
-                    // Async, so we need to attach a listener to complete the original tracing state when the async
-                    //      servlet request finishes.
-                    setupTracingCompletionWhenAsyncRequestCompletes(request, originalRequestTracingState);
-                }
-                else {
-                    // Not async, so we need to complete the request span now.
-                    tracer.completeRequestSpan();
-                }
-            }
-        }
-        finally {
-            //noinspection deprecation
-            unlinkTracingFromCurrentThread(originalThreadInfo);
-        }
+    protected Span createNewSpanForRequest(HttpServletRequest request) {
+	    	// See if there's trace info in the incoming request's headers. If so it becomes the parent trace.
+	    	Tracer tracer = Tracer.getInstance();
+	    	final Span parentSpan = HttpSpanFactory.fromHttpServletRequest(request, getUserIdHeaderKeys());
+	    	Span newSpan;
+	
+	    	if (parentSpan != null) {
+	    		logger.debug("Found parent Span {}", parentSpan);
+	    		newSpan = tracer.startRequestWithChildSpan(parentSpan, HttpSpanFactory.getSpanName(request));
+	    	} else {
+	    		newSpan = tracer.startRequestWithRootSpan(
+	    				getSpanNameFromHttpServletRequest(request),
+	    				HttpSpanFactory.getUserIdFromHttpServletRequest(request, getUserIdHeaderKeys())
+	    				);
+	    		logger.debug("Parent span not found, starting a new span {}", newSpan);
+	    	}
+	    	return newSpan;
+    }
+
+    protected void addTracingInfoToRequestAttributes(Span span, HttpServletRequest request) {
+	    	// Put the new span's trace info into the request attributes.
+	    	request.setAttribute(TraceHeaders.TRACE_SAMPLED, span.isSampleable());
+	    	request.setAttribute(TraceHeaders.TRACE_ID, span.getTraceId());
+	    	request.setAttribute(TraceHeaders.SPAN_ID, span.getSpanId());
+	    	request.setAttribute(TraceHeaders.PARENT_SPAN_ID, span.getParentSpanId());
+	    	request.setAttribute(TraceHeaders.SPAN_NAME, span.getSpanName());
+	    	request.setAttribute(Span.class.getName(), span);
+    }
+
+    /**
+     * In an effort to match tag patterns consistent with other implementations and with the OpenTracing standards, this method
+     * is responsible for adding the following tags to the {@code Span}:
+     * <ul>
+     * 	<li>http.url</li>
+     * 	<li>http.status_code</li>
+     * 	<li>http.method</li>
+     * 	<li>error</li>
+     * </ul>
+     * 
+     * These tag names are based on names provided via OpenTracing's <a href="https://github.com/opentracing/opentracing-java/blob/master/opentracing-api/src/main/java/io/opentracing/tag/Tags.java">Tags.java</a>
+     * 
+     * @param span - The {@code Span} object to be tagged
+     * @param request - {@code HttpServletRequest}
+     * @param response - {@code HttpServletResponse}
+     */
+    protected void tagSpanWithRequestAndResponseMetaData(Span span, HttpServletRequest request, HttpServletResponse response) {
+	    	span.putTag(OpenTracingTags.HTTP_URL, getHttpUrlForTagging(request));
+	    	span.putTag(OpenTracingTags.HTTP_STATUS, String.valueOf(response.getStatus()));
+	    	span.putTag(OpenTracingTags.HTTP_METHOD, request.getMethod());
+	    	if (tagSpanAsErrd(request, response)) {
+	    		span.putTag(OpenTracingTags.ERROR, "true");
+	    	}
+    }
+
+    /**
+     * @return true if the current {@code Span} should be tagged as having an errd state. This defaults to return true
+     * if the response status code is >= 500.  
+     * 
+     * Both the {@code HttpServletRequest} and {@code HttpServletResponse} are provided for inspection for other 
+     * subclass implementation overrides.
+     * 
+     * @param request - The incoming {@code HttpServletRequest} after the filter chain has been executed
+     * @param response - The resulting {@code HttpServletResponse}
+     */
+    protected boolean tagSpanAsErrd(HttpServletRequest request, HttpServletResponse response) {
+    		return response.getStatus() >= 500;
+    }
+
+    /**
+     * @return The value for the {@code http.url} tag.  The default is to use {@code request.getRequestURI()}. 
+     * Another plausible alternative the full URL without parameters: {@code request.getRequestURL()}
+     * 
+     * @param request - The {@code HttpServletRequest}
+     */
+    protected String getHttpUrlForTagging(HttpServletRequest request) {
+    		return request.getRequestURI();
+    }
+
+    /**
+     * @return The human-readable name to be given to a {@code Span} representing this request. The default is to use
+     *  {@code HttpSpanFactory.getSpanName(HttpServletRequest)}
+     */
+    protected String getSpanNameFromHttpServletRequest(HttpServletRequest request) {
+    		return HttpSpanFactory.getSpanName(request);
     }
 
     /**
