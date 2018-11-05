@@ -1,0 +1,11 @@
+if( Boolean.parseBoolean(getProperty("MuseErrorprone")) == true ){
+    apply plugin: "net.ltgt.errorprone", to: allprojects
+    configurations.errorprone {
+        resolutionStrategy.force "com.google.errorprone:error_prone_core:2.3.1"
+    }
+    tasks.withType(JavaCompile) {
+        configure(options) {
+            compilerArgs << "-XepAllErrorsAsWarnings"
+        }
+    }
+}
