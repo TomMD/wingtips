@@ -210,7 +210,7 @@ public class Tracer {
     public Span getCurrentSpan() {
         Deque<Span> spanStack = currentSpanStackThreadLocal.get();
 
-        return (spanStack == null) ? null : spanStack.peek();
+        return spanStack.peek();
     }
 
     /**
